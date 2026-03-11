@@ -116,8 +116,12 @@ class HiLAM(BaseHiGraphModel):
             )
 
             # Run same level processing on level l
+            # NOTE: new_node_rep (sender) is the freshly decoded representation
+            # from level l+1. rec_node_rep is the original level-l representation
+            # before the down pass — used as receiver so the GNN can compare the
+            # two and compute a meaningful update (mirrors mesh_up_step).
             mesh_rep_levels[level_l], mesh_same_rep[level_l] = same_gnn(
-                new_node_rep, new_node_rep, same_edge_rep
+                new_node_rep, rec_node_rep, same_edge_rep
             )
             # (B, N_mesh[l], d_h) and (B, M_same[l], d_h)
 

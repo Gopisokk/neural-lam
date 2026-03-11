@@ -13,6 +13,7 @@ from neural_lam.create_graph import create_graph_from_datastore
 from neural_lam.datastore import DATASTORES
 from neural_lam.datastore.base import BaseRegularGridDatastore
 from neural_lam.models.graph_lam import GraphLAM
+from neural_lam.models.hi_lam import HiLAM
 from neural_lam.weather_dataset import WeatherDataModule
 from tests.conftest import init_datastore_example
 
@@ -124,3 +125,80 @@ def test_training(datastore_name):
 def test_training_output_std():
     datastore = init_datastore_example("mdp")  # Test only with mdp datastore
     run_simple_training(datastore, set_output_std=True)
+
+
+def test_training_hi_lam():
+    """
+    Smoke test for HiLAM to catch regressions in hierarchical message passing,
+    specifically the mesh_down_step same-level GNN which previously received
+    identical sender and receiver tensors (fixed in this PR).
+    Uses detect_anomaly=True so degenerate (NaN-producing) GNN outputs fail loudly.
+    """
+    datastore = init_datastore_example("mdp")
+
+    if torch.cuda.is_available():
+        device_name = "cuda"
+        torch.set_float32_matmul_precision("high")
+    else:
+        device_name = "cpu"
+
+    graph_name = "hierarchical_2level"
+    graph_dir_path = Path(datastore.root_path) / "graph" / graph_name
+
+    if not graph_dir_path.exists():
+        create_graph_from_datastore(
+            datastore=datastore,
+            output_root_path=str(graph_dir_path),
+            n_max_levels=2,  # need >=2 levels to exercise mesh_down_step
+        )
+
+    data_module = WeatherDataModule(
+        datastore=datastore,
+        ar_steps_train=2,
+        ar_steps_eval=3,
+        standardize=True,
+        batch_size=2,
+        num_workers=0,  # single-worker to avoid spawn overhead in tests
+        num_past_forcing_steps=1,
+        num_future_forcing_steps=1,
+    )
+
+    class ModelArgs:
+        output_std = False
+        loss = "mse"
+        restore_opt = False
+        n_example_pred = 0
+        graph = graph_name
+        hidden_dim = 4
+        hidden_layers = 1
+        processor_layers = 1
+        mesh_aggr = "sum"
+        lr = 1.0e-3
+        val_steps_to_log = [1]
+        metrics_watch = []
+        num_past_forcing_steps = 1
+        num_future_forcing_steps = 1
+
+    model_args = ModelArgs()
+    config = nlconfig.NeuralLAMConfig(
+        datastore=nlconfig.DatastoreSelection(
+            kind=datastore.SHORT_NAME, config_path=datastore.root_path
+        )
+    )
+
+    model = HiLAM(
+        args=model_args,
+        datastore=datastore,
+        config=config,
+    )
+
+    trainer = pl.Trainer(
+        max_epochs=1,
+        deterministic=False,
+        accelerator=device_name,
+        devices=1,
+        log_every_n_steps=1,
+        detect_anomaly=True,  # raises if NaN produced by degenerate GNN outputs
+    )
+    wandb.init(mode="disabled")  # disable W&B for this test
+    trainer.fit(model=model, datamodule=data_module)
